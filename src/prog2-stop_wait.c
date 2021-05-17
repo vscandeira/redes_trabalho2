@@ -11,6 +11,16 @@
 #include <stdio.h>
 #include <string.h>
 
+/* possible events: */
+#define  TIMER_INTERRUPT 0
+#define  FROM_LAYER5     1
+#define  FROM_LAYER3     2
+
+#define  OFF             0
+#define  ON              1
+#define   A    0
+#define   B    1
+
 /* ******************************************************************
  ALTERNATING BIT AND GO-BACK-N NETWORK EMULATOR: VERSION 1.1  J.F.Kurose
 
@@ -48,8 +58,9 @@ struct pkt {
 /********* OS ALUNOS DEVEM ESCREVER AS SEGUINTES 07 ROTINAS*********/
 
 /* called from layer 5, passed the data to be sent to other side */
-int seqA = 0;
-int seqB = 0;
+int seqA;
+int seqB;
+struct msg curr_msg;				//mensagem do estado atual de A que precisa ser guardada no caso de NACK, ACK corrompido ou timeout
 A_output(message)
 	struct msg message; {
 	/* Segundo RFC, check sum do tcp é composto por
@@ -60,32 +71,22 @@ A_output(message)
 	 * tcp payload
 	 */
 
-	//contruir pacote
-	// atenção especial ao seqnum e ack num, rever video https://www.youtube.com/watch?v=9-E3EOpM9O8
-	// "É função do seu protocolo garantir que os dados em tal mensagem sejam entregues em ordem e corretamente à camada superior do lado receptor."
-	struct pkt *packet;
-	packet->seqnum = seqA;
-	packet->acknum = 0;
+	struct pkt packet;
+	packet.seqnum = seqA;
+	packet.acknum = 0;
 	//diferente dos cenários reais da rede, aqui o length de message da camada de aplicação é sempre o mesmo do payload, permitindo o uso de strcpy sem verificações adicionais
-	strcpy(packet->payload, message.data);
+	strcpy(packet.payload, message.data);
+	strcpy(curr_msg.data, message.data);			// guarda mensagem
 
-	int check = packet->seqnum + packet->acknum;
+	int check = packet.seqnum + packet.acknum;
 	for (int i=0; i<sizeof(message.data); i++){
 		check += (int) message.data[i];
 	}
-	packet->checksum = check;
+	packet.checksum = check;
 
-	//construir event
-	struct event *ev_pkt;
-	ev_pkt->evtime = time;
-	time+=1;
-	ev_pkt->evtype = 0;
-	ev_pkt->eventity = 0;
-	ev_pkt->pktptr = packet;
-	ev_pkt->prev = NULL;
-	ev_pkt->next = NULL;
-
-	insertevent(ev_pkt);
+	tolayer3(A, packet);
+	// o que é o parâmetro increment de starttimes? coloquei como 1 provisoriamente
+	starttimer(A, 1.0);
 }
 
 B_output(message)
@@ -98,21 +99,28 @@ B_output(message)
 A_input(packet)
 	struct pkt packet; {
 
-	//após recebimento de ACK, deve-se atualizar o valor de seqA
-	if (seqA == 0)
-		seqA+=1;
-	else
-		seqA=0;
+	int check = packet.seqnum + packet.acknum;
+	stoptimer(A);
+	if ( (check == packet.checksum) && (packet.acknum) ) {
+		//após recebimento de ACK, deve-se atualizar o valor de seqA
+		seqA = (seqA + 1) % 2;
+		curr_msg.data[0] = '\0';
+	} else {
+		A_output(curr_msg);
+	}
 }
 
 /* called when A's timer goes off */
 A_timerinterrupt() {
-
+	stoptimer(A);
+	A_output(curr_msg);
 }
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 A_init() {
+	int seqA = 0;
+	curr_msg.data[0] = '\0';
 }
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
@@ -120,26 +128,32 @@ A_init() {
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 B_input(packet)
 	struct pkt packet; {
-	struct msg message;
 
-	//calcular checksum,
-	int check = packet.seqnum + packet.acknum;
-	for (int i=0; i<sizeof(packet.payload); i++){
-		check += (int) packet.payload[i];
-	}
-	if ( (check == packet.checksum) && (packet.seqnum == seqB) ) {
+	struct pkt packet_asw;
+	packet_asw.seqnum = seqB;
 
+	if (packet.seqnum == seqB) {
+		//calcular checksum
+		int check = packet.seqnum + packet.acknum;
+		for (int i=0; i<sizeof(packet.payload); i++){
+			check += (int) packet.payload[i];
+		}
+		if ( check == packet.checksum ) {
+			//considerando que tolayer5 recebe como parâmetro diretamente char[20] e não struct message, optou-se por enviar diretamente o payload sem construir struct
+			tolayer5(packet.payload);
+			packet_asw.acknum = 1;
+			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
+			seqB = (seqB + 1) % 2;						//após envio de ACK/NACK, deve-se atualizar o valor de seqB
+		} else {
+			packet_asw.acknum = 0;
+			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
+		}
 	} else {
-
+		packet_asw.seqnum = (seqB + 1) % 2;
+		packet_asw.acknum = 1;
+		packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
 	}
-
-	insertevent(ev_pkt);
-
-	//após envio de ACK/NACK, deve-se atualizar o valor de seqB
-	if (seqB == 0)
-		seqB+=1;
-	else
-		seqB=0;
+	tolayer3(B,packet_asw);
 }
 
 /* called when B's timer goes off */
@@ -149,6 +163,7 @@ B_timerinterrupt() {
 /* the following rouytine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 B_init() {
+	seqB = 0;
 }
 
 /*****************************************************************
@@ -175,16 +190,6 @@ struct event {
 	struct event *next;
 };
 struct event *evlist = NULL; /* the event list */
-
-/* possible events: */
-#define  TIMER_INTERRUPT 0
-#define  FROM_LAYER5     1
-#define  FROM_LAYER3     2
-
-#define  OFF             0
-#define  ON              1
-#define   A    0
-#define   B    1
 
 int TRACE = 1; /* for my debugging */
 int nsim = 0; /* number of messages from 5 to 4 so far */
@@ -303,7 +308,11 @@ init() /* initialize the simulator */
 		printf("is different from what this emulator expects.  Please take\n");
 		printf(
 				"a look at the routine jimsrand() in the emulator code. Sorry. \n");
-		exit();
+
+		//como não há função exit() definida, acredita-se que se trata de um return
+		//exit();
+
+		return;
 	}
 
 	ntolayer3 = 0;
@@ -333,7 +342,8 @@ float jimsrand() {
 generate_next_arrival() {
 	double x, log(), ceil();
 	struct event *evptr;
-	char* malloc();
+	//não foi identificada usabilidade do ponteiro abaixo e sua declaração está incorreta, por isso linha foi comentada
+	//char* malloc();
 	float ttime;
 	int tempint;
 
@@ -434,7 +444,8 @@ starttimer(AorB, increment)
 
 	struct event *q;
 	struct event *evptr;
-	char* malloc();
+	//não foi identificada usabilidade do ponteiro abaixo e sua declaração está incorreta, por isso linha foi comentada
+	//char* malloc();
 
 	if (TRACE > 2)
 		printf("          START TIMER: starting timer at %f\n", time);
@@ -461,7 +472,8 @@ tolayer3(AorB, packet)
 	struct pkt packet; {
 	struct pkt *mypktptr;
 	struct event *evptr, *q;
-	char* malloc();
+	//não foi identificada usabilidade do ponteiro abaixo e sua declaração está incorreta, por isso linha foi comentada
+	//char* malloc();
 	float lastime, x, jimsrand();
 	int i;
 
