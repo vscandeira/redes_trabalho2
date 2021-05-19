@@ -71,6 +71,9 @@ A_output(message)
 	 * tcp payload
 	 */
 
+	if(curr_msg.data[0] != '\0'){
+	    return;
+	}
 	struct pkt packet;
 	packet.seqnum = seqA;
 	packet.acknum = 0;
@@ -86,7 +89,7 @@ A_output(message)
 
 	tolayer3(A, packet);
 	// o que é o parâmetro increment de starttimes? coloquei como 1 provisoriamente
-	starttimer(A, 1.0);
+	starttimer(A, 1000.0);
 }
 
 B_output(message)
@@ -100,13 +103,11 @@ A_input(packet)
 	struct pkt packet; {
 
 	int check = packet.seqnum + packet.acknum;
-	stoptimer(A);
 	if ( (check == packet.checksum) && (packet.acknum) ) {
 		//após recebimento de ACK, deve-se atualizar o valor de seqA
 		seqA = (seqA + 1) % 2;
 		curr_msg.data[0] = '\0';
-	} else {
-		A_output(curr_msg);
+		stoptimer(A);
 	}
 }
 
