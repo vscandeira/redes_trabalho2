@@ -58,6 +58,7 @@ struct pkt {
 /********* OS ALUNOS DEVEM ESCREVER AS SEGUINTES 07 ROTINAS*********/
 
 /* called from layer 5, passed the data to be sent to other side */
+float inc;
 int seqA;
 int seqB;
 struct msg curr_msg;				//mensagem do estado atual de A que precisa ser guardada no caso de NACK, ACK corrompido ou timeout
@@ -71,8 +72,16 @@ A_output(message)
 	 * tcp payload
 	 */
 
+	printf("\nChamada A_output - mensagem: %s\n", message.data);
+	printf("\nEstado de A: %d\n", seqA);
+
 	if(curr_msg.data[0] != '\0'){
-	    return;
+		if (strcmp(curr_msg.data, message.data) != 0) {
+			printf("\nChamada A_output: aguardando ACK/NACK, pacote ignorado\n");
+		    return;
+		} else {
+			printf("\nChamada A_output: reenvio de pacote\n");
+		}
 	}
 	struct pkt packet;
 	packet.seqnum = seqA;
@@ -87,9 +96,11 @@ A_output(message)
 	}
 	packet.checksum = check;
 
+	printf("\nChamada A_output - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+
 	tolayer3(A, packet);
 	// o que é o parâmetro increment de starttimes? coloquei como 1 provisoriamente
-	starttimer(A, 1000.0);
+	starttimer(A, inc);
 }
 
 B_output(message)
@@ -102,26 +113,48 @@ B_output(message)
 A_input(packet)
 	struct pkt packet; {
 
+	printf("\nChamada A_input - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+	printf("\nEstado de A: %d\n", seqA);
+
 	int check = packet.seqnum + packet.acknum;
-	if ( (check == packet.checksum) && (packet.acknum) ) {
-		//após recebimento de ACK, deve-se atualizar o valor de seqA
-		seqA = (seqA + 1) % 2;
-		curr_msg.data[0] = '\0';
-		stoptimer(A);
+	for (int i=0; i<sizeof(packet.payload); i++) {
+		check += (int) packet.payload[i];
+	}
+	if ( check == packet.checksum ) {
+		if (packet.acknum) {
+			if (seqA == packet.seqnum) {
+				//após recebimento de ACK, deve-se atualizar o valor de seqA
+				seqA = (seqA + 1) % 2;
+				curr_msg.data[0] = '\0';
+				stoptimer(A);
+			} else {
+				printf("\nChamada A_input - sequenciais divergentes\n");
+			}
+		} else {
+			printf("\nChamada A_input - recebido NACK\n");
+		}
+	} else {
+		printf("\nChamada A_input - pacote ACK/NACK corrompido - checksum calculado do pacote recebido: %d; checksum informado pelo pacote: %d\n", check, packet.checksum);
 	}
 }
 
 /* called when A's timer goes off */
 A_timerinterrupt() {
-	stoptimer(A);
+	printf("\nChamada A_timerinterrupt\n");
+	printf("\nEstado de A: %d\n", seqA);
+
 	A_output(curr_msg);
 }
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 A_init() {
-	int seqA = 0;
-	curr_msg.data[0] = '\0';
+	printf("\nChamada A_init\n");
+
+	inc = 1000.0;
+	seqA = 0;
+	for (int i=0; i<sizeof(curr_msg); i++)
+		curr_msg.data[i] = '\0';
 }
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
@@ -130,30 +163,36 @@ A_init() {
 B_input(packet)
 	struct pkt packet; {
 
+	printf("\nChamada B_input - pacote recebido - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+	printf("\nEstado de B: %d\n", seqB);
+
 	struct pkt packet_asw;
 	packet_asw.seqnum = seqB;
+	packet_asw.checksum = 0;
+	int check = packet.seqnum + packet.acknum;
+	// é calculado no mesmo loop o checksum provisório do pacote de resposta e o do pacote recebido
+	for (int i=0; i<sizeof(packet_asw.payload); i++) {
+		packet_asw.payload[i] = '\0';
+		packet_asw.checksum += (int) packet_asw.payload[i];
+		check += (int) packet.payload[i];
+	}
 
-	if (packet.seqnum == seqB) {
-		//calcular checksum
-		int check = packet.seqnum + packet.acknum;
-		for (int i=0; i<sizeof(packet.payload); i++){
-			check += (int) packet.payload[i];
-		}
-		if ( check == packet.checksum ) {
+	if ( check == packet.checksum ) {
+		packet_asw.acknum = 1;
+		if (packet.seqnum == seqB) {
 			//considerando que tolayer5 recebe como parâmetro diretamente char[20] e não struct message, optou-se por enviar diretamente o payload sem construir struct
 			tolayer5(packet.payload);
-			packet_asw.acknum = 1;
-			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
 			seqB = (seqB + 1) % 2;						//após envio de ACK/NACK, deve-se atualizar o valor de seqB
 		} else {
-			packet_asw.acknum = 0;
-			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
+			printf("\nChamada B_input - pacote com sequencial diferente do esperado: reenviando ack no último estado\n");
+			packet_asw.seqnum = (seqB + 1) % 2;
 		}
 	} else {
-		packet_asw.seqnum = (seqB + 1) % 2;
-		packet_asw.acknum = 1;
-		packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
+		printf("\nChamada B_input - pacote corrompido - checksum calculado do pacote recebido: %d; checksum informado pelo pacote: %d - NACK enviado\n", check, packet.checksum);
 	}
+
+	packet_asw.checksum += packet_asw.seqnum + packet_asw.acknum;
+	printf("\nChamada B_input - pacote enviado - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet_asw.seqnum, packet_asw.acknum, packet_asw.checksum, packet_asw.payload);
 	tolayer3(B,packet_asw);
 }
 
@@ -164,6 +203,8 @@ B_timerinterrupt() {
 /* the following rouytine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 B_init() {
+	printf("\n\nChamada B_init\n\n");
+
 	seqB = 0;
 }
 

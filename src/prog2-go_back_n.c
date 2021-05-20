@@ -68,24 +68,32 @@ struct msg curr_msgs[WINDOWSIZE];				//array de mensagens da janela de A que pre
 A_output(message)
 	struct msg message; {
 
+	printf("\nChamada A_output - mensagem: %s\n", message.data);
+
 	if (seqA < baseA + WINDOWSIZE) {
 		struct pkt packet;
 		packet.seqnum = seqA;
 		packet.acknum = 0;
 		//diferente dos cenários reais da rede, aqui o length de message da camada de aplicação é sempre o mesmo do payload, permitindo o uso de strcpy sem verificações adicionais
 		strcpy(packet.payload, message.data);
-		strcpy(curr_msgs[seqA-1].data, message.data);			// guarda mensagem
-
+		// guarda mensagem
+//		strcpy(curr_msgs[seqA-baseA].data, message.data);
+		for (int i=0; i<sizeof(message.data); i++)
+			curr_msgs[seqA-baseA].data[i] = message.data[i];
 		int check = packet.seqnum + packet.acknum;
 		for (int i=0; i<sizeof(message.data); i++){
 			check += (int) message.data[i];
 		}
 		packet.checksum = check;
 
+		printf("\nChamada A_output - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+
 		tolayer3(A, packet);
 		if (seqA == baseA)
 			starttimer(A, inc);
 		seqA++;
+	} else {
+		printf("\nChamada A_output: buffer cheio, pacote ignorado\n");
 	}
 }
 
@@ -99,25 +107,42 @@ B_output(message)
 A_input(packet)
 	struct pkt packet; {
 
+	printf("\nChamada A_input - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+
 	int check = packet.seqnum + packet.acknum;
-	if ( (check == packet.checksum) && (packet.acknum) ) {
-		//após recebimento de ACK, deve-se atualizar o valor de base
-		if (packet.seqnum == baseA) {
-			for (int i=1; i<sizeof(curr_msgs); i++)
-				strcpy(curr_msgs[i-1].data, curr_msgs[i].data);
-			curr_msgs[sizeof(curr_msgs)-1].data[0] = '\0';
-			stoptimer(A);
-			starttimer(A, inc);
+	for (int i=0; i<sizeof(packet.payload); i++) {
+		check += (int) packet.payload[i];
+	}
+	if ( check == packet.checksum ) {
+		if (packet.acknum) {
+			//após recebimento de ACK, deve-se atualizar o valor de base
+			if (packet.seqnum == baseA) {
+				for (int loops=1; loops<=seqA-baseA; loops++) {
+					for (int i=1; i<WINDOWSIZE; i++) {
+						for (int j=0; j<sizeof(curr_msgs[i]);j++)
+							curr_msgs[i-1].data[j] = curr_msgs[i].data[j];
+					}
+				}
+				for (int i=0; i<sizeof(curr_msgs[WINDOWSIZE-1].data); i++)
+					curr_msgs[WINDOWSIZE-1].data[i] = '\0';
+				stoptimer(A);
+				starttimer(A, inc);
+			}
+			baseA = packet.seqnum + 1;
+			if (baseA == seqA)
+				stoptimer(A, inc);
+		} else {
+			printf("\nChamada A_input - recebido NACK\n");
 		}
-		baseA = packet.seqnum + 1;
-		if (baseA == seqA)
-			stoptimer(A, inc);
+	} else {
+		printf("\nChamada A_input - pacote ACK/NACK corrompido - checksum calculado do pacote recebido: %d; checksum informado pelo pacote: %d\n", check, packet.checksum);
 	}
 }
 
 /* called when A's timer goes off */
 A_timerinterrupt() {
-	stoptimer(A);
+	printf("\nChamada A_timertnterrupt\n");
+
 	int resend = seqA-baseA+1;
 	seqA = baseA;
 	for(int i=0; i<resend; i++)
@@ -127,11 +152,15 @@ A_timerinterrupt() {
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 A_init() {
+	printf("\nChamada A_init\n");
+
 	inc = 1000.0;
 	seqA = 1;
 	baseA = 1;
-	for (int i=0; i<sizeof(curr_msgs); i++)
-		curr_msgs[i].data[0] = '\0';
+	for (int i=0; i<WINDOWSIZE; i++){
+		for (int j=0; j<sizeof(curr_msgs[i].data); j++)
+			curr_msgs[i].data[j] = '\0';
+	}
 }
 
 /* Note that with simplex transfer from a-to-B, there is no B_output() */
@@ -140,30 +169,35 @@ A_init() {
 B_input(packet)
 	struct pkt packet; {
 
+	printf("\nChamada B_input - pacote recebido - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet.seqnum, packet.acknum, packet.checksum, packet.payload);
+
 	struct pkt packet_asw;
 	packet_asw.seqnum = seqB;
+	packet_asw.checksum = 0;
+	int check = packet.seqnum + packet.acknum;
+	// é calculado no mesmo loop o checksum provisório do pacote de resposta e o do pacote recebido
+	for (int i=0; i<sizeof(packet_asw.payload); i++) {
+		packet_asw.payload[i] = '\0';
+		packet_asw.checksum += (int) packet_asw.payload[i];
+		check += (int) packet.payload[i];
+	}
 
+	packet_asw.acknum = 1;
 	if (packet.seqnum == seqB) {
-		//calcular checksum
-		int check = packet.seqnum + packet.acknum;
-		for (int i=0; i<sizeof(packet.payload); i++){
-			check += (int) packet.payload[i];
-		}
 		if ( check == packet.checksum ) {
-			//considerando que tolayer5 recebe como parâmetro diretamente char[20] e não struct message, optou-se por enviar diretamente o payload sem construir struct
 			tolayer5(packet.payload);
-			packet_asw.acknum = 1;
-			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
-			seqB = seqB++;						//após envio de ACK/NACK, deve-se atualizar o valor de seqB
+			seqB++;						//após envio de ACK/NACK, deve-se atualizar o valor de seqB
 		} else {
+			printf("\nChamada B_input - pacote corrompido - checksum calculado do pacote recebido: %d; checksum informado pelo pacote: %d - NACK enviado\n", check, packet.checksum);
 			packet_asw.acknum = 0;
-			packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
 		}
 	} else {
+		printf("\nChamada B_input - pacote com sequencial diferente do esperado: reenviando ack no último estado\n");
 		packet_asw.seqnum = seqB-1;
-		packet_asw.acknum = 1;
-		packet_asw.checksum = packet_asw.seqnum + packet_asw.acknum;
 	}
+
+	packet_asw.checksum += packet_asw.seqnum + packet_asw.acknum;
+	printf("\nChamada B_input - pacote enviado - pkt_seq: %d; pkt_ack: %d; pkt_checksum: %d; pkt_payload: %s\n", packet_asw.seqnum, packet_asw.acknum, packet_asw.checksum, packet_asw.payload);
 	tolayer3(B,packet_asw);
 }
 
@@ -174,6 +208,8 @@ B_timerinterrupt() {
 /* the following rouytine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 B_init() {
+	printf("\nChamada B_init\n");
+
 	seqB = 1;
 }
 
